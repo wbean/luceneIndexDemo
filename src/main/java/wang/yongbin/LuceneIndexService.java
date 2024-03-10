@@ -36,9 +36,10 @@ import java.util.stream.Collectors;
 @Slf4j
 @Component
 public class LuceneIndexService implements DisposableBean {
-    private final String EXAMPLE_DATA_FILE = "data.csv";
-    private final int EXAMPLE_DATA_FILE_COLUMN_LENGTH = 4;
-
+    public static final String ID = "id";
+    public static final String TITLE = "title";
+    public static final String STATUS = "status";
+    public static final String TIME = "time";
     private final IndexWriter writer;
     private IndexSearcher searcher;
     private final ReadWriteLock rwLock = new ReentrantReadWriteLock();
@@ -109,9 +110,11 @@ public class LuceneIndexService implements DisposableBean {
             writer = new IndexWriter(directory, config);
         }
 
+        // create IndexSearcher
         IndexReader reader = DirectoryReader.open(directory);
         searcher = new IndexSearcher(reader);
 
+        // refresh IndexSearcher every 5 seconds
         executorService.scheduleAtFixedRate(() -> {
             try {
                 refreshSearcher();
@@ -126,16 +129,17 @@ public class LuceneIndexService implements DisposableBean {
      * @throws IOException will be thrown if failed to initialize index data
      */
     private void initIndex() throws IOException {
-        // 从数据源加载文档数据并建立初始索引
+        // load data from CSV file
         List<DocData> docDataList = loadDataFromCSVFile();
         rwLock.writeLock().lock();
         try {
-            // 2. 遍历数据列表,为每个数据对象创建Lucene Document
+            // foreach DocData, create a Document
             for (DocData data : docDataList) {
                 Document doc = createDocument(data);
-                // 3. 将Document添加到IndexWriter中
+                // add Document to index
                 writer.addDocument(doc);
             }
+            // flush and commit
             writer.flush();
             writer.commit();
         } finally {
@@ -149,6 +153,7 @@ public class LuceneIndexService implements DisposableBean {
      * @throws IOException will be thrown if failed to load data from CSV file
      */
     private List<DocData> loadDataFromCSVFile() throws IOException {
+        String EXAMPLE_DATA_FILE = "data.csv";
         Resource resource = new ClassPathResource(EXAMPLE_DATA_FILE);
         InputStream inputStream = resource.getInputStream();
         BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
@@ -161,10 +166,15 @@ public class LuceneIndexService implements DisposableBean {
         while ((line = reader.readLine()) != null) {
             // split row by comma
             String[] values = line.split(",");
+
+            // check if the row has the correct number of columns
+            int EXAMPLE_DATA_FILE_COLUMN_LENGTH = 4;
             if (values.length != EXAMPLE_DATA_FILE_COLUMN_LENGTH) {
                 log.warn("Illegal data schemer:{}", line);
                 continue;
             }
+
+            // validate and parse each column
             long id;
             try {
                 id = Long.parseLong(values[0]);
@@ -189,6 +199,7 @@ public class LuceneIndexService implements DisposableBean {
                 continue;
             }
 
+            // create a DocData object
             data.add(DocData.builder()
                     .id(id)
                     .title(values[1])
@@ -214,11 +225,14 @@ public class LuceneIndexService implements DisposableBean {
             log.error("Failed to create document from data, param invalid", e);
             throw new RuntimeException(e);
         }
+
         List<Long> ids = docDataList.stream()
                 .map(DocData::getId)
                 .toList();
+
         rwLock.writeLock().lock();
         try {
+            // update documents
             writer.updateDocuments(LongPoint.newSetQuery("id", ids), docs);
             writer.flush();
             return ids.size();
@@ -248,13 +262,19 @@ public class LuceneIndexService implements DisposableBean {
         int start = (page - 1) * pageSize;
         int topN = page * pageSize;
 
+        // get Sort object from SearchParam
         Sort sort = getSort(searchParam);
 
+        // build Lucene Query from SearchParam
         Query query = buildQuery(searchParam);
+
         rwLock.readLock().lock();
         try {
+            // search index
             TopDocs topDocs = searcher.search(query, topN, sort);
             StoredFields storedFields = searcher.storedFields();
+
+            // get documents from TopDocs
             return Arrays.stream(topDocs.scoreDocs)
                     .filter(hit -> hit.doc >= start)
                     .map(hit -> {
@@ -266,10 +286,10 @@ public class LuceneIndexService implements DisposableBean {
                             return null;
                         }
                         return DocData.builder()
-                                .id(Long.parseLong(doc.get("id")))
-                                .title(doc.get("title"))
-                                .status(doc.get("status"))
-                                .time(Long.parseLong(doc.get("time")))
+                                .id(Long.parseLong(doc.get(ID)))
+                                .title(doc.get(TITLE))
+                                .status(doc.get(STATUS))
+                                .time(Long.parseLong(doc.get(TIME)))
                                 .build();
                     })
                     .filter(Objects::nonNull)
@@ -335,6 +355,7 @@ public class LuceneIndexService implements DisposableBean {
             builder.add(new FuzzyQuery(new Term("title", searchParam.getTitle()), 2), BooleanClause.Occur.SHOULD);
         }
 
+        // status support multi-value search
         if (searchParam.getStatuses() != null && !searchParam.getStatuses().isEmpty()) {
             BooleanQuery.Builder statusBuilder = new BooleanQuery.Builder();
             for (String status : searchParam.getStatuses()) {
@@ -343,6 +364,7 @@ public class LuceneIndexService implements DisposableBean {
             builder.add(statusBuilder.build(), BooleanClause.Occur.MUST);
         }
 
+        // time support range search
         if (searchParam.getStartTime() != null && searchParam.getEndTime() != null) {
             builder.add(LongPoint.newRangeQuery("time", searchParam.getStartTime(), searchParam.getEndTime()), BooleanClause.Occur.MUST);
         }
@@ -357,6 +379,7 @@ public class LuceneIndexService implements DisposableBean {
      * @return Lucene Document
      */
     private Document createDocument(DocData data) {
+        // validate data
         if(!validateData(data)){
             throw new RuntimeException("Illegal docData: " + data);
         }
@@ -371,6 +394,11 @@ public class LuceneIndexService implements DisposableBean {
         return doc;
     }
 
+    /**
+     * validate DocData object
+     * @param data DocData object
+     * @return true if the DocData object is valid, otherwise false
+     */
     private boolean validateData(DocData data) {
         if (data.getId() == null || data.getTitle() == null || data.getStatus() == null || data.getTime() == null) {
             return false;
